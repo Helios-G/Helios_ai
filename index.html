@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<title>CheXpert ONNX → Web Inference</title>
+<style>
+body {
+    font-family: Arial, sans-serif;
+    max-width: 1000px;
+    margin: auto;
+    padding: 30px;
+}
+h1 { text-align: center; }
+
+#dropZone {
+    width: 100%;
+    border: 3px dashed #777;
+    padding: 40px;
+    border-radius: 15px;
+    text-align: center;
+    cursor: pointer;
+    background: #f9f9f9;
+    margin-bottom: 20px;
+}
+#dropZone.dragover { background: #e3f2fd; border-color: #2277ff; }
+
+#preview { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+#preview img { width: 120px; height: 120px; border-radius: 8px; object-fit: cover; border: 2px solid #ddd; }
+
+button {
+    padding: 12px 20px;
+    border: none;
+    background: #2277ff;
+    color: white;
+    font-size: 18px;
+    border-radius: 8px;
+    cursor: pointer;
+    width: 100%;
+    margin-top: 10px;
+}
+button:disabled { background: #ccc; cursor: not-allowed; }
+#downloadBtn { background: #28a745; display: none; }
+#downloadBtn:hover { background: #218838; }
+
+#log {
+    font-size: 14px;
+    background: #f5f5f5;
+    padding: 15px;
+    margin-top: 20px;
+    border-radius: 10px;
+    white-space: pre-line;
+    height: 150px;
+    overflow-y: auto;
+    font-family: monospace;
+}
+
+#resultsTable {
+    margin-top: 20px;
+    width: 100%;
+    border-collapse: collapse;
+}
+#resultsTable th, #resultsTable td { border: 1px solid #ccc; padding: 10px; text-align: center; }
+#resultsTable th { background: #444; color: white; }
+.loading { opacity: 0.6; pointer-events: none; }
+</style>
+</head>
+<body>
+<h1>CheXpert Web AI View (Multi-label)</h1>
+
+<div id="dropZone">📁 Click or drag JPG images here</div>
+<input type="file" id="fileInput" accept="image/jpeg,image/jpg" multiple style="display:none" />
+
+<div id="preview"></div>
+
+<button id="analyzeBtn" disabled>🧠 Analyze Images</button>
+<button id="downloadBtn">📥 Download Results as CSV</button>
+
+<h3>📌 Log</h3>
+<div id="log"></div>
+
+<table id="resultsTable"></table>
+
+<!-- ONNX Runtime -->
+<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+
+<script>
+const INPUT_SIZE = 224;
+const CLASSES = [
+    'No Finding',
+    'Enlarged Cardiomediastinum',
+    'Cardiomegaly',
+    'Lung Opacity',
+    'Lung Lesion',
+    'Edema',
+    'Consolidation',
+    'Pneumonia',
+    'Atelectasis',
+    'Pneumothorax',
+    'Pleural Effusion',
+    'Pleural Other',
+    'Fracture',
+    'Support Devices'
+];
+
+let model, files = [], resultsData = [];
+
+function log(text) {
+    const time = new Date().toLocaleTimeString();
+    const box = document.getElementById("log");
+    box.textContent += `[${time}] ${text}\n`;
+    box.scrollTop = box.scrollHeight;
+}
+
+window.addEventListener('load', async () => {
+    if (typeof ort === 'undefined') {
+        log('❌ ONNX Runtime failed to load.');
+        return;
+    }
+    log('✅ ONNX Runtime loaded successfully');
+    await loadModel();
+    setupEventListeners();
+});
+
+async function loadModel() {
+    try {
+        log("Loading ONNX model...");
+        model = await ort.InferenceSession.create("chexpert.onnx", { executionProviders: ["wasm"] });
+        log("✅ Model loaded successfully!");
+        log(`Input: ${model.inputNames[0]}, Output: ${model.outputNames[0]}`);
+    } catch (error) {
+        log(`❌ Model loading failed: ${error.message}`);
+    }
+}
+
+function setupEventListeners() {
+    const dropZone = document.getElementById("dropZone");
+    const fileInput = document.getElementById("fileInput");
+    const analyzeBtn = document.getElementById("analyzeBtn");
+    const downloadBtn = document.getElementById("downloadBtn");
+
+    dropZone.onclick = () => fileInput.click();
+    dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("dragover"); });
+    dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+    dropZone.addEventListener("drop", e => { e.preventDefault(); dropZone.classList.remove("dragover"); handleFiles(e.dataTransfer.files); });
+    fileInput.addEventListener("change", e => handleFiles(e.target.files));
+
+    analyzeBtn.onclick = runInference;
+    downloadBtn.onclick = downloadCSV;
+}
+
+function handleFiles(selected) {
+    const jpgFiles = Array.from(selected).filter(file => file.type === "image/jpeg" || file.type === "image/jpg");
+    if (!jpgFiles.length) { log("⚠️ Please select JPG/JPEG files only!"); return; }
+
+    files = jpgFiles;
+    document.getElementById("analyzeBtn").disabled = false;
+    document.getElementById("downloadBtn").style.display = "none";
+
+    const preview = document.getElementById("preview");
+    preview.innerHTML = "";
+    files.forEach(file => {
+        const img = document.createElement("img");
+        img.src = URL.createObjectURL(file);
+        img.onload = () => URL.revokeObjectURL(img.src);
+        preview.appendChild(img);
+    });
+
+    log(`${files.length} JPG image(s) selected.`);
+}
+
+async function preprocess(file) {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.src = URL.createObjectURL(file);
+        img.onload = () => {
+            try {
+                const canvas = document.createElement("canvas");
+                canvas.width = INPUT_SIZE;
+                canvas.height = INPUT_SIZE;
+                const ctx = canvas.getContext("2d");
+                ctx.drawImage(img, 0, 0, INPUT_SIZE, INPUT_SIZE);
+                const { data } = ctx.getImageData(0, 0, INPUT_SIZE, INPUT_SIZE);
+                const tensor = new Float32Array(3 * INPUT_SIZE * INPUT_SIZE);
+
+                const mean = [0.485,0.456,0.406];
+                const std = [0.229,0.224,0.225];
+
+                for(let h=0;h<INPUT_SIZE;h++){
+                    for(let w=0;w<INPUT_SIZE;w++){
+                        const idx = (h*INPUT_SIZE + w);
+                        const px = idx*4;
+                        tensor[idx] = (data[px]/255 - mean[0])/std[0];
+                        tensor[INPUT_SIZE*INPUT_SIZE + idx] = (data[px+1]/255 - mean[1])/std[1];
+                        tensor[INPUT_SIZE*INPUT_SIZE*2 + idx] = (data[px+2]/255 - mean[2])/std[2];
+                    }
+                }
+
+                URL.revokeObjectURL(img.src);
+                resolve(new ort.Tensor("float32", tensor, [1,3,INPUT_SIZE,INPUT_SIZE]));
+            } catch(e){ reject(e); }
+        };
+        img.onerror = () => { URL.revokeObjectURL(img.src); reject(new Error(`Failed to load image: ${file.name}`)); };
+    });
+}
+
+async function runInference() {
+    if(!model){ log("❌ Model not loaded!"); return; }
+
+    log("🧠 Starting analysis...");
+    const analyzeBtn = document.getElementById("analyzeBtn");
+    analyzeBtn.disabled = true;
+    document.body.classList.add("loading");
+
+    const table = document.getElementById("resultsTable");
+    table.innerHTML = `<tr><th>Image</th>${CLASSES.map(c=>`<th>${c}</th>`).join('')}</tr>`;
+    resultsData = [];
+
+    try {
+        for(const file of files){
+            log(`Processing: ${file.name}`);
+            const inputTensor = await preprocess(file);
+            const feeds = {}; feeds[model.inputNames[0]] = inputTensor;
+            const output = await model.run(feeds);
+            const outputTensor = output[model.outputNames[0]];
+            const probs = Array.from(outputTensor.data); // sigmoid outputs
+            const threshold = 0.5;
+
+            // Store for CSV
+            resultsData.push({
+                filename: file.name,
+                probs: probs.map(p => p.toFixed(4)),
+                positive: probs.map(p => p>=threshold)
+            });
+
+            const row = document.createElement("tr");
+            row.innerHTML = `<td>${file.name}</td>` + probs.map((p,i)=>`<td style="background:${p>=threshold?'#ffcccc':'#d4edda'}">${(p*100).toFixed(1)}%</td>`).join('');
+            table.appendChild(row);
+
+            log(`✅ ${file.name} processed`);
+        }
+        log("🎉 Analysis completed!");
+        document.getElementById("downloadBtn").style.display = "block";
+    } catch(e){
+        log(`❌ Error: ${e.message}`);
+    } finally{
+        analyzeBtn.disabled = false;
+        document.body.classList.remove("loading");
+    }
+}
+
+function downloadCSV(){
+    if(!resultsData.length){ log("⚠️ No results to download!"); return; }
+
+    let csv = "Filename," + CLASSES.join(",") + "\n";
+    resultsData.forEach(r => {
+        csv += `"${r.filename}",${r.probs.join(",")}\n`;
+    });
+
+    const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.href = url;
+    link.download = `chexpert_results_${Date.now()}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    log("📥 CSV file downloaded!");
+}
+</script>
+</body>
+</html>
