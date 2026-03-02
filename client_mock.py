@@ -1,6 +1,16 @@
 import asyncio
 import websockets
 import json
+        {/* 2. 가이드 박스 */}
+        <div className="p-8 mb-12 rounded-lg border border-[#F5E6D3]" style={{ backgroundColor: '#FFF9F5' }}>
+          <h3 className="text-lg font-bold mb-4" style={{ color: '#6B3131' }}>연합학습 참여 가이드</h3>
+          <div className="space-y-2 text-gray-700 text-sm">
+            <p>원하는 세션의 참여하기 버튼을 클릭 후, 안내에 따라 라벨링을 진행합니다.</p>
+            <p>조건 기관 수가 채워지면 학습이 자동 시작됩니다.</p>
+            <p>완료된 목록은 모델 다운로드 페이지에서 다운받아 사용이 가능합니다.</p>
+          </div>
+        </div>
+
 
 async def simulate_client(name):
     uri = "ws://localhost:8083"
