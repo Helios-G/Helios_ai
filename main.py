@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import numpy as np
 import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
@@ -8,7 +9,7 @@ from typing import Dict, List
 
 app = FastAPI(title="HELIOS AI-FL Server")
 
-SPRING_BOOT_URL = "http://localhost:8080" 
+SPRING_BOOT_URL = os.getenv("SPRING_BOOT_URL", "http://localhost:8081")
 sessions: Dict[str, Dict] = {}
 
 class TrainStartRequest(BaseModel):
