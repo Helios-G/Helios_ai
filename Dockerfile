@@ -11,9 +11,8 @@ RUN pip install --no-cache-dir fastapi uvicorn websockets numpy httpx
 # 현재 폴더(helios_ai)의 모든 파일을 컨테이너의 /app으로 복사
 COPY . .
 
-# AI 서버가 사용하는 포트 두 개를 열어줌
-EXPOSE 8083 
-EXPOSE 8080
+# AI 서버 포트
+EXPOSE 8000
 
 # 컨테이너 실행 시 파이썬 파일 실행 
 CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
