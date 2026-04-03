@@ -112,8 +112,8 @@ async def run_fl_loop(session_id: str, rounds: int = 5):
         # ---------------------------------------------------------
         # 🌟 모델 압축 및 S3 업로드 프로세스 (요구사항 반영)
         # ---------------------------------------------------------
-        timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M")
-        file_name = f"helios_v1_{session_id}_{timestamp}.zip"
+        run_date = datetime.datetime.now().strftime("%Y%m%d")
+        file_name = f"{run_date}-Round{rounds}-v1.zip"
         zip_path = f"./{file_name}"
         
         # 가중치 파일 생성 및 압축
