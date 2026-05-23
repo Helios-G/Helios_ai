@@ -1,8 +1,11 @@
-echo "venv/" >> .gitignore
-echo "__pycache__/" >> .gitignore
-echo "*.pyc" >> .gitignore
-echo ".DS_Store" >> .gitignore
-echo "saved_models/" >> .gitignore
-
-
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+saved_models/
 /data
+preprocessing/segmentation/*saved_model*/
+.env
+.env.local
+.env.*
+!.env.example
