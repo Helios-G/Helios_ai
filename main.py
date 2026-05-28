@@ -7,20 +7,120 @@ from pathlib import Path
 import numpy as np
 import httpx
 from fastapi import FastAPI, WebSocket, Query, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
+
+BASE_DIR = Path(__file__).resolve().parent
+ENV_FILE = BASE_DIR / ".env"
+
+
+def load_local_env(env_file: Path) -> None:
+    if not env_file.exists():
+        return
+
+    for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_local_env(ENV_FILE)
 
 app = FastAPI(title="HELIOS AI-FL Server")
 
+
+def parse_cors_origins() -> List[str]:
+    raw_origins = os.getenv("CORS_ORIGINS")
+    if raw_origins:
+        return [
+            origin.strip()
+            for origin in raw_origins.split(",")
+            if origin.strip()
+        ]
+
+    return [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
+
+CORS_ORIGINS = parse_cors_origins()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 SPRING_BOOT_URL = os.getenv("SPRING_BOOT_URL", "http://localhost:8081")
+GEMINI_BASE_URL = os.getenv(
+    "GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta"
+)
+GEMINI_REPORT_MODEL = os.getenv("GEMINI_REPORT_MODEL", "gemini-2.5-flash")
 sessions: Dict[str, Dict] = {}
-REPORTS_DIR = Path(__file__).resolve().parent / "reports"
+REPORTS_DIR = BASE_DIR / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
 
 # 백엔드 학습 시작 요청 모델
 class TrainStartRequest(BaseModel):
     participants: List[int]
     rounds: int
+
+
+class DiagnosticResultItem(BaseModel):
+    name: str
+    score: float
+
+
+class DiagnosticReportRequest(BaseModel):
+    sessionId: Optional[str] = None
+    generatedAt: Optional[str] = None
+    modelId: Optional[str] = None
+    modelTitle: str
+    domainLabel: str
+    imageFileName: Optional[str] = None
+    results: List[DiagnosticResultItem]
+    notes: Optional[str] = None
+    locale: str = "ko-KR"
+
+
+class DiagnosticReportResponse(BaseModel):
+    generatedAt: str
+    provider: str
+    model: str
+    summary: str
+    findings: str
+    recommendations: List[str]
+    caution: str
+    draft: str
+    storedPath: str
+
+
+REPORT_RESPONSE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "summary": {"type": "string"},
+        "findings": {"type": "string"},
+        "recommendations": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "caution": {"type": "string"},
+        "draft": {"type": "string"},
+    },
+    "required": ["summary", "findings", "recommendations", "caution", "draft"],
+}
 
 
 def normalize_domain(raw_value: Any) -> str:
@@ -83,6 +183,137 @@ def maybe_start_requested_session(session_id: str) -> bool:
 
 def report_path_for_session(session_id: str) -> Path:
     return REPORTS_DIR / f"session_{session_id}_screening_report.json"
+
+
+def llm_report_path(session_id: Optional[str]) -> Path:
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_session_id = session_id or "playground"
+    return REPORTS_DIR / f"llm_report_{safe_session_id}_{timestamp}.json"
+
+
+def build_report_payload(request: DiagnosticReportRequest) -> Dict[str, Any]:
+    sorted_results = sorted(request.results, key=lambda item: item.score, reverse=True)
+    top_results = [
+        {"name": item.name, "score": round(float(item.score), 1)}
+        for item in sorted_results[:5]
+    ]
+    return {
+        "sessionId": request.sessionId,
+        "generatedAt": request.generatedAt,
+        "modelId": request.modelId,
+        "modelTitle": request.modelTitle,
+        "domainLabel": request.domainLabel,
+        "imageFileName": request.imageFileName,
+        "topResults": top_results,
+        "notes": request.notes or "",
+        "locale": request.locale,
+    }
+
+
+def extract_response_text(payload: Dict[str, Any]) -> str:
+    candidates = payload.get("candidates", [])
+    if not isinstance(candidates, list) or not candidates:
+        raise ValueError("Gemini response candidates are missing")
+
+    first_candidate = candidates[0]
+    if not isinstance(first_candidate, dict):
+        raise ValueError("Gemini response candidate is invalid")
+
+    content = first_candidate.get("content", {})
+    if not isinstance(content, dict):
+        raise ValueError("Gemini response content is invalid")
+
+    parts = content.get("parts", [])
+    if not isinstance(parts, list):
+        raise ValueError("Gemini response parts are missing")
+
+    collected: List[str] = []
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        text_value = part.get("text")
+        if isinstance(text_value, str) and text_value.strip():
+            collected.append(text_value)
+
+    if not collected:
+        raise ValueError("Gemini response text is empty")
+
+    return "\n".join(collected)
+
+
+async def create_llm_report(request: DiagnosticReportRequest) -> Dict[str, Any]:
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="GEMINI_API_KEY or GOOGLE_API_KEY is not configured on the AI server.",
+        )
+
+    if not request.results:
+        raise HTTPException(status_code=400, detail="results must contain at least one item")
+
+    normalized_request = build_report_payload(request)
+    endpoint = (
+        f"{GEMINI_BASE_URL.rstrip('/')}/models/{GEMINI_REPORT_MODEL}:generateContent"
+    )
+    instructions = (
+        "당신은 의료진의 AI 판독 보조 시스템이다. "
+        "반드시 한국어로 작성하고, 제공된 정보만 사용해 진단 리포트 초안을 생성한다. "
+        "환자 정보나 검사 정보를 임의로 지어내지 말고, 근거가 없는 확정 진단 표현을 피한다. "
+        "recommendations는 2~4개의 짧은 문장 배열로 작성한다. "
+        "draft는 실제 의료 리포트 초안처럼 자연스러운 문단 형태로 작성한다. "
+        "항상 AI 보조 결과이며 최종 판단은 의료진이 해야 한다는 주의를 포함한다."
+    )
+
+    request_body = {
+        "system_instruction": {
+            "parts": [
+                {
+                    "text": instructions,
+                }
+            ]
+        },
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": json.dumps(normalized_request, ensure_ascii=False, indent=2),
+                    }
+                ]
+            }
+        ],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseJsonSchema": REPORT_RESPONSE_SCHEMA,
+        }
+    }
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            endpoint,
+            headers={
+                "x-goog-api-key": api_key,
+                "Content-Type": "application/json",
+            },
+            json=request_body,
+        )
+
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Gemini report generation failed: {response.text}",
+        )
+
+    raw_payload = response.json()
+    try:
+        parsed = json.loads(extract_response_text(raw_payload))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to parse Gemini report payload: {exc}",
+        ) from exc
+
+    return parsed
 
 
 class ScreeningReviewAgent:
@@ -521,6 +752,36 @@ async def get_screening_report(session_id: str):
         return json.loads(report_path.read_text(encoding="utf-8"))
 
     raise HTTPException(status_code=404, detail="screening report not found")
+
+
+@app.post("/reports/diagnostic-draft", response_model=DiagnosticReportResponse)
+async def generate_diagnostic_report(req: DiagnosticReportRequest):
+    llm_result = await create_llm_report(req)
+    generated_at = datetime.datetime.now().isoformat()
+    stored_path = llm_report_path(req.sessionId)
+    response_payload = {
+        "generatedAt": generated_at,
+        "provider": "gemini",
+        "model": GEMINI_REPORT_MODEL,
+        "summary": llm_result["summary"],
+        "findings": llm_result["findings"],
+        "recommendations": llm_result["recommendations"],
+        "caution": llm_result["caution"],
+        "draft": llm_result["draft"],
+        "storedPath": str(stored_path.relative_to(REPORTS_DIR.parent)),
+    }
+    stored_path.write_text(
+        json.dumps(
+            {
+                "request": build_report_payload(req),
+                "response": response_payload,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return response_payload
 
 # 웹소켓 엔드포인트
 @app.websocket("/ws/fl/{session_id}/{user_token}")
