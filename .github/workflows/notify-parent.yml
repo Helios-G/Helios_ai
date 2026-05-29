@@ -1,0 +1,20 @@
+name: Notify Parent Repo
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger parent repo update
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PAT_TOKEN }}
+          script: |
+            await github.rest.repos.createDispatchEvent({
+              owner: 'Helios-G',
+              repo: 'helios',
+              event_type: 'submodule-updated',
+            })
